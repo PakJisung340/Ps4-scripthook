@@ -66,6 +66,7 @@ static void *init_thread(void *arg)
     plat_log("=== scripthook start (CUSA00419 build, eboot " SHV_EBOOT_SHA256 ") ===");
     if (shv_core_init(plat_main_module_base(), 1, core_log) != 0) {
         plat_log("berhenti: signature/base tidak cocok. Lihat docs/ANALISIS.md dan README.");
+        plat_notify("Scripthook tidak cocok dengan versi game ini\nLihat scripthook.log\nCoded by Said Awali");
         return NULL;
     }
 
@@ -75,9 +76,14 @@ static void *init_thread(void *arg)
         plat_sleep_ms(1);
         waited_ms++;
     }
-    if (!hooked) { plat_log("berhenti: GET_GAME_TIMER tidak pernah terdaftar dalam 180 detik"); return NULL; }
+    if (!hooked) {
+        plat_log("berhenti: GET_GAME_TIMER tidak pernah terdaftar dalam 180 detik");
+        plat_notify("Scripthook gagal dimuat\nLihat scripthook.log\nCoded by Said Awali");
+        return NULL;
+    }
     snprintf(line, sizeof line, "hook dipasang setelah %u ms menunggu", waited_ms);
     plat_log(line);
+    plat_notify("Scripthook aktif\nCoded by Said Awali");
 
     /* Pengawas: beri tahu di log kalau hook terpasang tapi tidak pernah dipanggil. */
     for (unsigned s = 0; s < 120; s++) {
@@ -92,7 +98,7 @@ static void *init_thread(void *arg)
 /* Metadata yang dibaca GoldHEN (sama seperti plugin contoh di GoldHEN_Plugins_Repository). */
 attr_public const char *g_pluginName = "scripthook";
 attr_public const char *g_pluginDesc = "Script Hook (Lua) untuk GTA V PS4, story mode";
-attr_public const char *g_pluginAuth = "scripthook";
+attr_public const char *g_pluginAuth = "Said Awali";
 attr_public unsigned int g_pluginVersion = 0x00000100; /* 1.00 */
 
 /* Titik masuk sebenarnya: GoldHEN memanggil plugin_load saat plugin dimuat di proses game.
