@@ -14,6 +14,8 @@ int  plat_start_thread(void *(*fn)(void *), void *arg);
 void plat_sleep_ms(unsigned ms);
 /* Tulis satu baris ke SHV_DIR/scripthook.log */
 void plat_log(const char *msg);
+/* 0 kalau penulisan log pernah gagal (folder tidak ada / tidak boleh ditulis). */
+int  plat_log_ok(void);
 /* Tampilkan notifikasi di layar PS4 (boleh berisi \n). */
 void plat_notify(const char *msg);
 /* Baca seluruh file; buffer dari malloc, NUL-terminated. Return 0 sukses. */
