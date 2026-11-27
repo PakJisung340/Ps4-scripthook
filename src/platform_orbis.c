@@ -13,7 +13,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <orbis/libkernel.h>   /* scePthreadCreate, sceKernelUsleep */
+/*
+ * Header OpenOrbis v0.5.4 tidak mendeklarasikan tipe ScePthread (build #2 gagal di sini),
+ * jadi dua fungsi libkernel dideklarasikan sendiri dengan nama lokal; __asm__ menjaga
+ * nama simbol aslinya untuk linker. Nama lokal berbeda mencegah konflik dengan header.
+ */
+extern int shv_pthread_create(void **thread, const void *attr, void *(*entry)(void *),
+                              void *arg, const char *name) __asm__("scePthreadCreate");
+extern int shv_usleep(unsigned int usec) __asm__("sceKernelUsleep");
 
 /*
  * Base eboot. Pada PS4 retail, modul utama (eboot.bin) umumnya dimuat di 0x400000
@@ -36,13 +43,13 @@ uintptr_t plat_main_module_base(void)
 
 int plat_start_thread(void *(*fn)(void *), void *arg)
 {
-    ScePthread t;
-    return scePthreadCreate(&t, NULL, fn, arg, "shv_init") == 0 ? 0 : -1;
+    void *t = NULL; /* ScePthread adalah pointer ke struct thread */
+    return shv_pthread_create(&t, NULL, fn, arg, "shv_init") == 0 ? 0 : -1;
 }
 
 void plat_sleep_ms(unsigned ms)
 {
-    sceKernelUsleep(ms * 1000u);
+    shv_usleep(ms * 1000u);
 }
 
 void plat_log(const char *msg)
