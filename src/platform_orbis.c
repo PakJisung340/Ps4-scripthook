@@ -158,12 +158,16 @@ static void ensure_dir(void)
     shv_mkdir("/data/GoldHEN/scripthook", 0777);   /* sudah ada = abaikan error */
 }
 
+static int g_log_ok = 1;
+
+int plat_log_ok(void) { return g_log_ok; }
+
 void plat_log(const char *msg)
 {
     FILE *f;
     ensure_dir();
     f = fopen(SHV_DIR "/scripthook.log", "a");
-    if (!f) return;
+    if (!f) { g_log_ok = 0; return; }
     fputs(msg, f);
     fputc('\n', f);
     fclose(f);
