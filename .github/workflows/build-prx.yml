@@ -124,6 +124,7 @@ jobs:
             echo "== LIBS setelah diubah =="; grep -n '^LIBS' work_build/scripthook/Makefile
             echo "== isi common =="; ls -la common
             echo "== plugin_common.h =="; sed -n '1,200p' common/plugin_common.h 2>/dev/null || true
+            echo "== deklarasi notifikasi di header SDK =="; grep -n -i "notif" "$GOLDHEN_SDK"/include/*.h 2>/dev/null || true
             true
           } 2>&1 | tee logs/template.txt
 
