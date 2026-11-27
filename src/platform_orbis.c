@@ -53,6 +53,35 @@ uintptr_t plat_main_module_base(void)
     return base;
 }
 
+/*
+ * Notifikasi layar lewat sceKernelSendNotificationRequest (libkernel). Tata letak struct
+ * diambil dari kode homebrew PS4 yang umum dipakai, BELUM diuji di console ini; kalau salah,
+ * paling buruk notifikasi tidak muncul. URI ikon sama dengan TEX_ICON_SYSTEM di
+ * plugin_common.h milik GoldHEN.
+ */
+extern int shv_send_notification(int device, void *req, size_t size, int blocking)
+    __asm__("sceKernelSendNotificationRequest");
+
+typedef struct {
+    int type, reqId, priority, msgId, targetId, userId, unk1, unk2, appId, errorNum, unk3;
+    unsigned char useIconImageUri;
+    char message[1024];
+    char iconImageUri[1024];
+    char unk[1024];
+} shv_notify_req;
+
+void plat_notify(const char *msg)
+{
+    shv_notify_req req;
+    memset(&req, 0, sizeof req);
+    req.type = 0;
+    req.targetId = -1;
+    req.useIconImageUri = 1;
+    snprintf(req.message, sizeof req.message, "%s", msg);
+    snprintf(req.iconImageUri, sizeof req.iconImageUri, "%s", "cxml://psnotification/tex_icon_system");
+    shv_send_notification(0, &req, sizeof req, 0);
+}
+
 int plat_start_thread(void *(*fn)(void *), void *arg)
 {
     void *t = NULL; /* ScePthread adalah pointer ke struct thread */
