@@ -107,11 +107,25 @@ jobs:
           rm -rf work_build bin common
           mkdir -p work_build bin/plugins/prx_final bin/plugins/elf_final common
           cp -r "$tpl" work_build/scripthook
-          { echo "== struktur kerangka =="; find work_build/scripthook -type f | head -60; \
-            echo "== Makefile kerangka =="; cat work_build/scripthook/Makefile; \
-            echo "== source/main.c kerangka =="; cat work_build/scripthook/source/main.c 2>/dev/null | head -150; \
-            echo "== header SDK =="; ls "$GOLDHEN_SDK/include"; \
-            echo "== plugin_common.h =="; cat "$GOLDHEN_SDK/include/plugin_common.h" 2>/dev/null | head -150; } | tee logs/template.txt
+          # header bersama plugin (plugin_common.h dll.) ada di folder common milik repo plugin
+          commonsrc="$tpl/../../common"
+          if [ -d "$commonsrc" ]; then
+            cp -r "$commonsrc"/. common/
+          else
+            echo "::error::folder common tidak ditemukan di $commonsrc"
+            find repo -maxdepth 3 -type d -not -path '*/.git*' | head -40
+            exit 1
+          fi
+          # Makefile kerangka menautkan library screenshot/remoteplay yang tidak kita pakai;
+          # biarkan hanya yang dibutuhkan agar .prx tidak minta modul yang tidak dimuat
+          sed -i 's/^LIBS := .*/LIBS := -lSceLibcInternal -lGoldHEN_Hook -lkernel/' work_build/scripthook/Makefile
+          {
+            echo "== struktur kerangka =="; find work_build/scripthook -type f | head -60
+            echo "== LIBS setelah diubah =="; grep -n '^LIBS' work_build/scripthook/Makefile
+            echo "== isi common =="; ls -la common
+            echo "== plugin_common.h =="; sed -n '1,200p' common/plugin_common.h 2>/dev/null || true
+            true
+          } 2>&1 | tee logs/template.txt
 
           # folder sumber kerangka = folder tempat file .c/.cpp pertamanya berada
           srcfile=$(find work_build/scripthook -type f \( -name '*.c' -o -name '*.cpp' \) | head -n1)
