@@ -58,10 +58,11 @@ typedef struct {
     unsigned char fingerprint[20];
 } shv_modinfo;
 
-uintptr_t plat_main_module_base(void)
+void plat_main_module(uintptr_t *base_out, size_t *size_out)
 {
     char *buf = NULL; size_t len = 0;
     uintptr_t base = 0, first_base = 0;
+    size_t tsize = 0, first_size = 0;
     int handles[256];
     size_t n = 0;
     char line[256];
@@ -73,7 +74,9 @@ uintptr_t plat_main_module_base(void)
         if (v) {
             snprintf(line, sizeof line, "base dari base.txt: 0x%llx", v);
             plat_log(line);
-            return (uintptr_t)v;
+            *base_out = (uintptr_t)v;
+            *size_out = 0x27AAC0CUL;      /* ukuran segmen kode eboot analisis: pasti terbaca */
+            return;
         }
     }
 
@@ -90,18 +93,21 @@ uintptr_t plat_main_module_base(void)
                      (unsigned)i, handles[i], mi.name, (unsigned long long)(uintptr_t)mi.seg[0].address,
                      mi.seg[0].size, mi.seg_count);
             plat_log(line);
-            if (!first_base) first_base = (uintptr_t)mi.seg[0].address;
-            if (!base && strstr(mi.name, "eboot")) base = (uintptr_t)mi.seg[0].address;
+            if (!first_base) { first_base = (uintptr_t)mi.seg[0].address; first_size = mi.seg[0].size; }
+            if (!base && strstr(mi.name, "eboot")) { base = (uintptr_t)mi.seg[0].address; tsize = mi.seg[0].size; }
         }
     } else {
         plat_log("sceKernelGetModuleList gagal");
     }
 
-    if (!base) base = first_base;     /* modul pertama = executable utama */
+    if (!base) { base = first_base; tsize = first_size; }   /* modul pertama = executable utama */
     if (!base) { plat_log("base tidak terbaca dari sistem, memakai 0x400000"); base = 0x400000; }
-    snprintf(line, sizeof line, "base dipakai: 0x%llx", (unsigned long long)base);
+    if (!tsize) tsize = 0x27AAC0CUL;
+    snprintf(line, sizeof line, "base dipakai: 0x%llx, ukuran kode: 0x%llx",
+             (unsigned long long)base, (unsigned long long)tsize);
     plat_log(line);
-    return base;
+    *base_out = base;
+    *size_out = tsize;
 }
 
 /*
