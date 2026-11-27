@@ -30,6 +30,9 @@ typedef void (*shv_native_fn)(shv_ctx *ctx);
  * kalau versi eboot tidak cocok. Return 0 kalau sukses. */
 int shv_core_init(uintptr_t base, int verify, shv_log_fn log);
 
+/* Ringkasan diagnosis (base + byte asli) dari shv_core_init yang gagal; untuk notifikasi. */
+const char *shv_last_diag(void);
+
 /* Handler asli (belum di-hook) untuk hash, atau NULL kalau belum terdaftar. */
 shv_native_fn shv_find_handler(uint64_t hash);
 
