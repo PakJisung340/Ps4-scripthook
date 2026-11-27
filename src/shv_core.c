@@ -24,6 +24,8 @@ _Static_assert(offsetof(shv_ctx, argc) == 0x08, "argc di +0x08");
 #define MAX_HOOKS 4
 
 static uintptr_t   g_base;
+static uintptr_t   g_buckets;   /* alamat array 256 bucket (dari offset statis atau hasil pemindaian) */
+static uintptr_t   g_reg;       /* alamat RegisterNative */
 static shv_log_fn  g_log;
 static struct { uint64_t hash; shv_native_fn orig; shv_native_fn wrapper; } g_hooks[MAX_HOOKS];
 static int g_nhooks;
@@ -55,6 +57,8 @@ static void log_bytes(const char *label, const uint8_t *p, size_t n)
 int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
 {
     g_base = base;
+    g_buckets = base + OFF_NATIVE_BUCKETS;
+    g_reg = base + OFF_REGISTER_NATIVE;
     g_log = log;
     g_nhooks = 0;
 
@@ -91,7 +95,7 @@ int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
 /* Cari slot (node,indeks) untuk hash. */
 static int find_slot(uint64_t hash, shv_node **node_out, uint32_t *idx_out)
 {
-    shv_node **buckets = (shv_node **)(g_base + OFF_NATIVE_BUCKETS);
+    shv_node **buckets = (shv_node **)g_buckets;
     shv_node *n = buckets[hash & 0xFF];
     int guard = 0;
     while (n && guard++ < 4096) {
@@ -172,3 +176,91 @@ int shv_call(uint64_t hash, const uint64_t *args, uint32_t argc, uint64_t *ret)
     if (ret) memcpy(ret, retbuf, sizeof retbuf);
     return 0;
 }
+
+/* ------------------------------------------------------------------------------------------
+ * Pencarian layout saat runtime (untuk build game yang beda dari eboot yang dianalisis).
+ *
+ * Log console menunjukkan build yang jalan tidak identik dengan eboot yang dianalisis (ukuran
+ * segmen kode beda, byte di offset statis bukan awal RegisterNative). Pola pendaftaran native
+ * sama di semua build:
+ *     lea rsi,[rip+handler] ; movabs rdi,<hash> ; call RegisterNative
+ * Dari pendaftaran GET_GAME_TIMER kita dapat alamat handler dan RegisterNative, lalu
+ * "lea r12,[rip+disp]" di dalam RegisterNative memberi alamat array bucket.
+ * Hanya memindai segmen kode modul utama (R-X), jadi aman dibaca.
+ * ------------------------------------------------------------------------------------------ */
+static int locate_by_scan(uintptr_t base, size_t text_size)
+{
+    const uint8_t *t = (const uint8_t *)base;
+    const uint64_t h = H_GET_GAME_TIMER;
+    uint8_t pat[8];
+    static const uint8_t sig_tmr[SIG_GET_GAME_TIMER_LEN] = SIG_GET_GAME_TIMER;
+    int hits = 0, shaped = 0;
+
+    memcpy(pat, &h, 8);
+    for (size_t i = 9; i + 13 <= text_size; i++) {
+        const uint8_t *q = (const uint8_t *)memchr(t + i, pat[0], text_size - 13 - i + 1);
+        int32_t d_lea, d_call;
+        uintptr_t handler, reg, bucket = 0;
+        int found_lea = 0;
+
+        if (!q) break;
+        i = (size_t)(q - t);
+        if (memcmp(q, pat, 8) != 0) continue;
+        hits++;
+        if (!(q[-2] == 0x48 && q[-1] == 0xBF && q[-9] == 0x48 && q[-8] == 0x8D && q[-7] == 0x35 && q[8] == 0xE8))
+            continue;
+        shaped++;
+        memcpy(&d_lea, q - 6, 4);
+        memcpy(&d_call, q + 9, 4);
+        handler = (uintptr_t)((intptr_t)(q - 2) + d_lea);
+        reg = (uintptr_t)((intptr_t)(q + 13) + d_call);
+        if (handler < base || handler + sizeof sig_tmr > base + text_size) continue;
+        if (reg < base || reg + 0x80 > base + text_size) continue;
+        if (memcmp((const void *)handler, sig_tmr, sizeof sig_tmr) != 0) continue;   /* handler harus GET_GAME_TIMER */
+        if (memcmp((const void *)reg, "\x55\x48\x89\xE5", 4) != 0) continue;          /* prolog push rbp; mov rbp,rsp */
+
+        for (size_t j = 0; j < 0x60; j++) {
+            const uint8_t *c = (const uint8_t *)reg + j;
+            if (c[0] == 0x4C && c[1] == 0x8D && c[2] == 0x25) {                       /* lea r12,[rip+disp32] */
+                int32_t d; memcpy(&d, c + 3, 4);
+                bucket = (uintptr_t)((intptr_t)(c + 7) + d);
+                found_lea = 1;
+                break;
+            }
+        }
+        if (!found_lea) continue;
+        if (bucket >= base && bucket < base + text_size) continue;                     /* tabel ada di data, bukan di kode */
+
+        g_reg = reg;
+        g_buckets = bucket;
+        logf_("layout ditemukan lewat pemindaian: RegisterNative=base+0x%llx tabel=base+0x%llx",
+              (uint64_t)(reg - base), (uint64_t)(bucket - base));
+        logf_("  (offset statis analisis: RegisterNative=+0x%llx tabel=+0x%llx)",
+              (uint64_t)OFF_REGISTER_NATIVE, (uint64_t)OFF_NATIVE_BUCKETS);
+        return 0;
+    }
+    snprintf(g_diag, sizeof g_diag, "scan gagal: hit=%d berpola=%d\nbase=0x%llx size=0x%llx",
+             hits, shaped, (unsigned long long)base, (unsigned long long)text_size);
+    logf_("pemindaian gagal: hit hash=%llu berpola=%llu", (uint64_t)hits, (uint64_t)shaped);
+    return -1;
+}
+
+int shv_core_init_auto(uintptr_t base, size_t text_size, shv_log_fn log)
+{
+    /* 1. coba offset statis (build yang sama dengan eboot analisis) */
+    if (OFF_REGISTER_NATIVE + SIG_REGISTER_NATIVE_LEN <= text_size &&
+        OFF_GET_GAME_TIMER_HANDLER + SIG_GET_GAME_TIMER_LEN <= text_size &&
+        shv_core_init(base, 1, log) == 0) {
+        logf_("offset statis cocok (build sama dengan eboot analisis), tabel=base+0x%llx", OFF_NATIVE_BUCKETS, 0);
+        return 0;
+    }
+    /* 2. cari lewat pola kode */
+    g_base = base;
+    g_log = log;
+    g_nhooks = 0;
+    logf_("offset statis tidak cocok; memindai segmen kode (base=0x%llx size=0x%llx)", base, (uint64_t)text_size);
+    return locate_by_scan(base, text_size);
+}
+
+uintptr_t shv_buckets_addr(void) { return g_buckets; }
+uintptr_t shv_register_native_addr(void) { return g_reg; }
