@@ -36,6 +36,10 @@ static void logf_(const char *fmt, uint64_t a, uint64_t b)
     g_log(buf);
 }
 
+static char g_diag[200];
+
+const char *shv_last_diag(void) { return g_diag; }
+
 /* Cetak n byte dalam hex ke log, untuk membandingkan signature yang diharapkan dan yang ada. */
 static void log_bytes(const char *label, const uint8_t *p, size_t n)
 {
@@ -70,7 +74,15 @@ int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
             log_bytes("  yang ada  ", (const uint8_t *)(base + OFF_GET_GAME_TIMER_HANDLER), sizeof sig_tmr);
             bad = 1;
         }
-        if (bad) return -1;
+        if (bad) {
+            const uint8_t *r = (const uint8_t *)(base + OFF_REGISTER_NATIVE);
+            const uint8_t *t = (const uint8_t *)(base + OFF_GET_GAME_TIMER_HANDLER);
+            snprintf(g_diag, sizeof g_diag,
+                     "base=0x%llx\nRN: %02x %02x %02x %02x %02x %02x %02x %02x\nGT: %02x %02x %02x %02x %02x %02x",
+                     (unsigned long long)base, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                     t[0], t[1], t[2], t[3], t[4], t[5]);
+            return -1;
+        }
     }
     logf_("core siap, base=0x%llx tabel=0x%llx", base, base + OFF_NATIVE_BUCKETS);
     return 0;
