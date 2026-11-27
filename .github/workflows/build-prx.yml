@@ -102,16 +102,23 @@ jobs:
             exit 1
           fi
           echo "Kerangka: $tpl"
-          rm -rf build_plugin && cp -r "$tpl" build_plugin
-          { echo "== struktur kerangka =="; find build_plugin -type f | head -60; \
-            echo "== Makefile kerangka =="; cat build_plugin/Makefile; } | tee logs/template.txt
+          # Makefile kerangka memakai nama folder sebagai nama .prx dan menaruh hasil di
+          # ../../bin/plugins, jadi tata letak ditiru: work_build/scripthook + bin/plugins
+          rm -rf work_build bin common
+          mkdir -p work_build bin/plugins/prx_final bin/plugins/elf_final common
+          cp -r "$tpl" work_build/scripthook
+          { echo "== struktur kerangka =="; find work_build/scripthook -type f | head -60; \
+            echo "== Makefile kerangka =="; cat work_build/scripthook/Makefile; \
+            echo "== source/main.c kerangka =="; cat work_build/scripthook/source/main.c 2>/dev/null | head -150; \
+            echo "== header SDK =="; ls "$GOLDHEN_SDK/include"; \
+            echo "== plugin_common.h =="; cat "$GOLDHEN_SDK/include/plugin_common.h" 2>/dev/null | head -150; } | tee logs/template.txt
 
           # folder sumber kerangka = folder tempat file .c/.cpp pertamanya berada
-          srcfile=$(find build_plugin -type f \( -name '*.c' -o -name '*.cpp' \) | head -n1)
+          srcfile=$(find work_build/scripthook -type f \( -name '*.c' -o -name '*.cpp' \) | head -n1)
           if [ -z "$srcfile" ]; then echo "::error::kerangka tidak punya file .c/.cpp"; exit 1; fi
           srcdir=$(dirname "$srcfile")
           echo "Folder sumber kerangka: $srcdir"
-          find build_plugin -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+          find work_build/scripthook -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
             -not -path '*/GoldHEN*' -not -path '*/include/*' -delete || true
 
           # sumber kita
@@ -128,14 +135,15 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          cd build_plugin
-          make 2>&1 | tee ../logs/plugin-build.log
+          cd work_build/scripthook
+          make 2>&1 | tee "$GITHUB_WORKSPACE/logs/plugin-build.log"
 
       - name: Kumpulkan hasil
         run: |
           set -euxo pipefail
           mkdir -p out
-          found=$(find build_plugin -name '*.prx' | head -n1)
+          find bin work_build -name '*.prx' -o -name '*.elf' -o -name '*.oelf' | tee logs/hasil-build.txt
+          found=$(find bin work_build -name '*.prx' | head -n1)
           if [ -z "$found" ]; then echo "::error::Tidak ada file .prx dihasilkan. Lihat build-log."; exit 1; fi
           cp "$found" out/scripthook.prx
           cp scripts/example.lua scripts/scripts.txt out/
