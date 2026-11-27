@@ -10,7 +10,7 @@
  *
  * Asumsi yang HARUS dibuktikan di console (lihat README, bagian "Belum terbukti"):
  *  - Script game me-resolve handler dari tabel SETELAH plugin memasang hook.
- *  - Signature module_start di bawah cocok dengan GoldHEN Plugin SDK yang kamu pakai.
+ *  - plugin_load dipanggil GoldHEN (dikonfirmasi dari main.c plugin contoh, build #3).
  */
 #include "offsets.h"
 #include "platform.h"
@@ -23,6 +23,9 @@
 # if __has_include(<plugin_common.h>)
 #  include <plugin_common.h>
 # endif
+#endif
+#ifndef attr_public
+# define attr_public __attribute__((visibility("default")))
 #endif
 #ifndef attr_module_hidden
 # define attr_module_hidden
@@ -86,16 +89,36 @@ static void *init_thread(void *arg)
     return NULL;
 }
 
-int attr_module_hidden module_start(size_t argc, const void *args)
+/* Metadata yang dibaca GoldHEN (sama seperti plugin contoh di GoldHEN_Plugins_Repository). */
+attr_public const char *g_pluginName = "scripthook";
+attr_public const char *g_pluginDesc = "Script Hook (Lua) untuk GTA V PS4, story mode";
+attr_public const char *g_pluginAuth = "scripthook";
+attr_public unsigned int g_pluginVersion = 0x00000100; /* 1.00 */
+
+/* Titik masuk sebenarnya: GoldHEN memanggil plugin_load saat plugin dimuat di proses game.
+ * module_start/module_stop di plugin contoh hanya "return 0", jadi dibuat sama. */
+int attr_public plugin_load(int argc, const char *argv[])
 {
-    (void)argc; (void)args;
+    (void)argc; (void)argv;
     return plat_start_thread(init_thread, NULL) == 0 ? 0 : -1;
 }
 
-int attr_module_hidden module_stop(size_t argc, const void *args)
+int attr_public plugin_unload(int argc, const char *argv[])
 {
-    (void)argc; (void)args;
+    (void)argc; (void)argv;
     shv_unhook_all();
     shv_lua_shutdown();
+    return 0;
+}
+
+int attr_module_hidden module_start(long argc, const void *args)
+{
+    (void)argc; (void)args;
+    return 0;
+}
+
+int attr_module_hidden module_stop(long argc, const void *args)
+{
+    (void)argc; (void)args;
     return 0;
 }
