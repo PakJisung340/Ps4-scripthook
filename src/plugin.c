@@ -60,15 +60,21 @@ static void *init_thread(void *arg)
 {
     unsigned waited_ms = 0;
     int hooked = 0;
+    int core_ok = 0;
     char line[96];
     (void)arg;
 
     plat_log("=== scripthook start (CUSA00419 build, eboot " SHV_EBOOT_SHA256 ") ===");
     if (!plat_log_ok())
         plat_notify("Scripthook: log tidak bisa ditulis ke\n/data/GoldHEN/scripthook\nCoded by Said Awali");
-    if (shv_core_init(plat_main_module_base(), 1, core_log) != 0) {
+    {
+        uintptr_t base = 0; size_t tsize = 0;
+        plat_main_module(&base, &tsize);
+        core_ok = (shv_core_init_auto(base, tsize, core_log) == 0);
+    }
+    if (!core_ok) {
         char msg[400];
-        plat_log("berhenti: signature/base tidak cocok. Lihat docs/ANALISIS.md dan README.");
+        plat_log("berhenti: layout game tidak ditemukan. Lihat docs/ANALISIS.md dan README.");
         /* diagnosis ikut ditampilkan di layar karena log belum tentu bisa ditulis */
         snprintf(msg, sizeof msg, "Scripthook tidak cocok dengan versi game ini\n%s\nCoded by Said Awali",
                  shv_last_diag());
