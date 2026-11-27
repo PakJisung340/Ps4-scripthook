@@ -30,7 +30,14 @@ jobs:
       - name: Paket build
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld make curl unzip python3 git
+          sudo apt-get install -y clang lld llvm make curl unzip python3 git
+          # Makefile SDK memanggil llvm-ar dkk tanpa nomor versi; Ubuntu hanya menyediakan llvm-ar-18
+          for f in /usr/bin/llvm-*-18; do
+            n=$(basename "$f" -18)
+            [ -e "/usr/bin/$n" ] || sudo ln -s "$f" "/usr/local/bin/$n"
+          done
+          which llvm-ar llvm-objcopy || true
+          llvm-ar --version | head -2
 
       - name: Unduh OpenOrbis toolchain
         env:
