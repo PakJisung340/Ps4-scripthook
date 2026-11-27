@@ -64,9 +64,15 @@ static void *init_thread(void *arg)
     (void)arg;
 
     plat_log("=== scripthook start (CUSA00419 build, eboot " SHV_EBOOT_SHA256 ") ===");
+    if (!plat_log_ok())
+        plat_notify("Scripthook: log tidak bisa ditulis ke\n/data/GoldHEN/scripthook\nCoded by Said Awali");
     if (shv_core_init(plat_main_module_base(), 1, core_log) != 0) {
+        char msg[400];
         plat_log("berhenti: signature/base tidak cocok. Lihat docs/ANALISIS.md dan README.");
-        plat_notify("Scripthook tidak cocok dengan versi game ini\nLihat scripthook.log\nCoded by Said Awali");
+        /* diagnosis ikut ditampilkan di layar karena log belum tentu bisa ditulis */
+        snprintf(msg, sizeof msg, "Scripthook tidak cocok dengan versi game ini\n%s\nCoded by Said Awali",
+                 shv_last_diag());
+        plat_notify(msg);
         return NULL;
     }
 
