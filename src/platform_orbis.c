@@ -23,6 +23,18 @@ extern int shv_pthread_create(void **thread, const void *attr, void *(*entry)(vo
 extern int shv_usleep(unsigned int usec) __asm__("sceKernelUsleep");
 
 /*
+ * Header OpenOrbis memetakan errno ke __errno_location(), tetapi libSceLibcInternal
+ * (yang ditautkan Makefile kerangka GoldHEN) tidak mengekspornya: build #4 gagal di tahap
+ * link hanya karena simbol ini, dipakai oleh lauxlib.c (luaL_fileresult dkk., tidak kita pakai).
+ * Sediakan sendiri; hidden supaya tidak keluar sebagai ekspor modul.
+ */
+static int g_shv_errno;
+__attribute__((visibility("hidden"))) int *__errno_location(void)
+{
+    return &g_shv_errno;
+}
+
+/*
  * Base eboot. Pada PS4 retail, modul utama (eboot.bin) umumnya dimuat di 0x400000
  * (dipakai juga oleh cheat GoldHEN: "eboot.bin + offset"). Kalau base di console
  * kamu beda, taruh angkanya (misalnya 0x400000) di SHV_DIR/base.txt.
