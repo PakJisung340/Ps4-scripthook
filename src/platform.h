@@ -7,8 +7,8 @@
 
 #define SHV_DIR "/data/GoldHEN/scripthook"
 
-/* Alamat load eboot (modul utama game). */
-uintptr_t plat_main_module_base(void);
+/* Alamat load dan ukuran segmen kode (R-X) modul utama game. Ukuran dipakai untuk memindai. */
+void plat_main_module(uintptr_t *base_out, size_t *text_size_out);
 /* Mulai thread latar. Return 0 sukses. */
 int  plat_start_thread(void *(*fn)(void *), void *arg);
 void plat_sleep_ms(unsigned ms);
