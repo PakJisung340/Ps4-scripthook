@@ -30,6 +30,12 @@ typedef void (*shv_native_fn)(shv_ctx *ctx);
  * kalau versi eboot tidak cocok. Return 0 kalau sukses. */
 int shv_core_init(uintptr_t base, int verify, shv_log_fn log);
 
+/* Seperti shv_core_init, tetapi kalau offset statis tidak cocok, cari layout lewat pola kode
+ * di segmen kode [base, base+text_size). Return 0 sukses. */
+int shv_core_init_auto(uintptr_t base, size_t text_size, shv_log_fn log);
+uintptr_t shv_buckets_addr(void);
+uintptr_t shv_register_native_addr(void);
+
 /* Ringkasan diagnosis (base + byte asli) dari shv_core_init yang gagal; untuk notifikasi. */
 const char *shv_last_diag(void);
 
