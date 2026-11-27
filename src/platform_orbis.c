@@ -144,9 +144,25 @@ void plat_sleep_ms(unsigned ms)
     shv_usleep(ms * 1000u);
 }
 
+/*
+ * fopen tidak membuat folder: tanpa /data/GoldHEN/scripthook, log gagal ditulis diam-diam
+ * (itulah yang terjadi di uji pertama di console). Buat foldernya sekali sebelum menulis.
+ */
+extern int shv_mkdir(const char *path, int mode) __asm__("sceKernelMkdir");
+
+static void ensure_dir(void)
+{
+    static int done;
+    if (done) return;
+    done = 1;
+    shv_mkdir("/data/GoldHEN/scripthook", 0777);   /* sudah ada = abaikan error */
+}
+
 void plat_log(const char *msg)
 {
-    FILE *f = fopen(SHV_DIR "/scripthook.log", "a");
+    FILE *f;
+    ensure_dir();
+    f = fopen(SHV_DIR "/scripthook.log", "a");
     if (!f) return;
     fputs(msg, f);
     fputc('\n', f);
