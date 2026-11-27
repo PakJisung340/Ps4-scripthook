@@ -36,6 +36,18 @@ static void logf_(const char *fmt, uint64_t a, uint64_t b)
     g_log(buf);
 }
 
+/* Cetak n byte dalam hex ke log, untuk membandingkan signature yang diharapkan dan yang ada. */
+static void log_bytes(const char *label, const uint8_t *p, size_t n)
+{
+    char buf[200];
+    size_t pos = 0;
+    if (!g_log) return;
+    pos += (size_t)snprintf(buf, sizeof buf, "%s:", label);
+    for (size_t i = 0; i < n && pos + 4 < sizeof buf; i++)
+        pos += (size_t)snprintf(buf + pos, sizeof buf - pos, " %02x", p[i]);
+    g_log(buf);
+}
+
 int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
 {
     g_base = base;
@@ -45,14 +57,20 @@ int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
     if (verify) {
         static const uint8_t sig_reg[SIG_REGISTER_NATIVE_LEN] = SIG_REGISTER_NATIVE;
         static const uint8_t sig_tmr[SIG_GET_GAME_TIMER_LEN] = SIG_GET_GAME_TIMER;
+        int bad = 0;
         if (memcmp((const void *)(base + OFF_REGISTER_NATIVE), sig_reg, sizeof sig_reg) != 0) {
-            logf_("signature RegisterNative tidak cocok di base 0x%llx (+0x%llx): versi eboot atau base salah", base, OFF_REGISTER_NATIVE);
-            return -1;
+            logf_("signature RegisterNative tidak cocok di base 0x%llx (+0x%llx)", base, OFF_REGISTER_NATIVE);
+            log_bytes("  seharusnya", sig_reg, sizeof sig_reg);
+            log_bytes("  yang ada  ", (const uint8_t *)(base + OFF_REGISTER_NATIVE), sizeof sig_reg);
+            bad = 1;
         }
         if (memcmp((const void *)(base + OFF_GET_GAME_TIMER_HANDLER), sig_tmr, sizeof sig_tmr) != 0) {
             logf_("signature GET_GAME_TIMER tidak cocok di base 0x%llx (+0x%llx)", base, OFF_GET_GAME_TIMER_HANDLER);
-            return -1;
+            log_bytes("  seharusnya", sig_tmr, sizeof sig_tmr);
+            log_bytes("  yang ada  ", (const uint8_t *)(base + OFF_GET_GAME_TIMER_HANDLER), sizeof sig_tmr);
+            bad = 1;
         }
+        if (bad) return -1;
     }
     logf_("core siap, base=0x%llx tabel=0x%llx", base, base + OFF_NATIVE_BUCKETS);
     return 0;
