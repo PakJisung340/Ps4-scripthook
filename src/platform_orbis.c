@@ -41,15 +41,66 @@ __attribute__((visibility("hidden"))) int *__errno_location(void)
  * Signature byte dicek di shv_core_init, jadi base yang salah akan ditolak
  * dengan pesan di log, bukan dipakai diam-diam.
  */
+/*
+ * Daftar modul proses (libkernel). Tata letak SceKernelModuleInfo dari kode homebrew PS4
+ * (ukuran total 0x160 byte). BELUM diuji di console; kalau hasilnya gagal, jatuh ke 0x400000
+ * dan semua modul yang terbaca dicatat di scripthook.log untuk diagnosis.
+ */
+extern int shv_get_module_list(int *handles, size_t num, size_t *actual) __asm__("sceKernelGetModuleList");
+extern int shv_get_module_info(int handle, void *info) __asm__("sceKernelGetModuleInfo");
+
+typedef struct { void *address; unsigned int size; int prot; } shv_modseg;
+typedef struct {
+    size_t size;
+    char name[256];
+    shv_modseg seg[4];
+    unsigned int seg_count;
+    unsigned char fingerprint[20];
+} shv_modinfo;
+
 uintptr_t plat_main_module_base(void)
 {
     char *buf = NULL; size_t len = 0;
-    uintptr_t base = 0x400000;
+    uintptr_t base = 0, first_base = 0;
+    int handles[256];
+    size_t n = 0;
+    char line[256];
+
+    /* 1. override manual */
     if (plat_read_file(SHV_DIR "/base.txt", &buf, &len) == 0) {
         unsigned long long v = strtoull(buf, NULL, 0);
-        if (v) base = (uintptr_t)v;
         free(buf);
+        if (v) {
+            snprintf(line, sizeof line, "base dari base.txt: 0x%llx", v);
+            plat_log(line);
+            return (uintptr_t)v;
+        }
     }
+
+    /* 2. tanya sistem: modul bernama eboot */
+    memset(handles, 0, sizeof handles);
+    if (shv_get_module_list(handles, 256, &n) == 0) {
+        for (size_t i = 0; i < n && i < 256; i++) {
+            shv_modinfo mi;
+            memset(&mi, 0, sizeof mi);
+            mi.size = sizeof mi;
+            if (shv_get_module_info(handles[i], &mi) != 0) continue;
+            mi.name[sizeof mi.name - 1] = 0;
+            snprintf(line, sizeof line, "modul[%u] handle=%d nama=%s seg0=0x%llx size=0x%x segmen=%u",
+                     (unsigned)i, handles[i], mi.name, (unsigned long long)(uintptr_t)mi.seg[0].address,
+                     mi.seg[0].size, mi.seg_count);
+            plat_log(line);
+            if (!first_base) first_base = (uintptr_t)mi.seg[0].address;
+            if (!base && strstr(mi.name, "eboot")) base = (uintptr_t)mi.seg[0].address;
+        }
+    } else {
+        plat_log("sceKernelGetModuleList gagal");
+    }
+
+    if (!base) base = first_base;     /* modul pertama = executable utama */
+    if (!base) { plat_log("base tidak terbaca dari sistem, memakai 0x400000"); base = 0x400000; }
+    snprintf(line, sizeof line, "base dipakai: 0x%llx", (unsigned long long)base);
+    plat_log(line);
     return base;
 }
 
