@@ -34,6 +34,32 @@ int shv_core_init(uintptr_t base, int verify, shv_log_fn log);
  * di segmen kode [base, base+text_size). Return 0 sukses. */
 int shv_core_init_auto(uintptr_t base, size_t text_size, shv_log_fn log);
 uintptr_t shv_buckets_addr(void);
+
+/* Cek apakah [addr, addr+len) terpetakan dan bisa dibaca (dipasok platform; aman dari crash). */
+typedef int (*shv_readable_fn)(uintptr_t addr, size_t len);
+
+/* Cari tabel native lewat BENTUK datanya (bukan hash atau kode): array 256 pointer di segmen data
+ * yang menunjuk ke node dengan handler di segmen kode dan hash[0]&0xFF == nomor bucket.
+ * Dipakai kalau build game memakai hash yang berbeda dari yang dianalisis. Return 0 sukses. */
+int shv_core_init_structural(uintptr_t tbase, size_t tsize, uintptr_t dbase, size_t dsize,
+                             shv_readable_fn rd, shv_log_fn log);
+
+/* Hash kanonik (nativedb) -> hash build 1.57; 0 kalau tidak dikenal. */
+uint64_t shv_xlate(uint64_t canon);
+
+/* Jumlah native yang terdaftar di tabel saat ini (0 kalau tabel belum terisi). */
+int shv_native_count(void);
+
+/* 1 kalau hash terdaftar di tabel. */
+int shv_has_native(uint64_t hash);
+
+/* Kandidat "GET_GAME_TIMER" untuk build berhash lain: handler yang hanya mengembalikan satu u32 dari
+ * variabel global. counter = alamat variabel itu. nA/nB = jumlah kecocokan tiap bentuk kode. */
+typedef struct { uint64_t hash; uintptr_t counter; } shv_timer_cand;
+int shv_find_timer_candidates(shv_timer_cand *out, int max, int *nA, int *nB);
+
+/* Tulis seluruh tabel (hash, handler relatif ke base, 16 byte awal handler) per baris ke sink. */
+void shv_dump_natives(shv_log_fn sink);
 uintptr_t shv_register_native_addr(void);
 
 /* Ringkasan diagnosis (base + byte asli) dari shv_core_init yang gagal; untuk notifikasi. */
