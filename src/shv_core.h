@@ -79,4 +79,11 @@ void shv_unhook_all(void);
  * Return 0 sukses, -1 native tidak ada. Hook dilewati (selalu handler asli). */
 int shv_call(uint64_t hash, const uint64_t *args, uint32_t argc, uint64_t *ret);
 
+/* Panggil handler lewat VA eboot (alamat dari natives.lua). Return -1 kalau VA di luar segmen kode. */
+int shv_call_addr(uint64_t va, const uint64_t *args, uint32_t argc, uint64_t *ret);
+
+/* Panggil handler lewat VA (relatif ke base eboot), gaya Velora.invoke. Hanya alamat yang terdaftar di tabel native
+ * yang diterima; return -1 kalau bukan. */
+int shv_call_va(uint64_t va, const uint64_t *args, uint32_t argc, uint64_t *ret);
+
 #endif
