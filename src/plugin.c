@@ -36,6 +36,8 @@ static volatile int  g_busy;
 static volatile int  g_lua_ready;
 static volatile uint32_t g_ticks;
 static uint32_t      g_last_timer;
+static uint32_t      g_last_frame = 0xFFFFFFFFu;
+static int           g_frame_ok = 1;      /* 0 kalau GET_FRAME_COUNT tidak bisa dipanggil */
 
 static void core_log(const char *m) { plat_log(m); }
 
@@ -45,7 +47,16 @@ static void timer_wrapper(shv_ctx *ctx)
     g_orig_timer(ctx);                       /* hasil asli ditulis ke ctx->ret */
     if (!ctx->ret) return;
     t = (uint32_t)*(int32_t *)ctx->ret;
-    if (t == g_last_timer) return;           /* satu tick per perubahan timer */
+    if (t == g_last_timer) return;           /* timer harus berubah */
+    if (g_frame_ok) {                        /* satu tick per FRAME, bukan per panggilan timer */
+        uint64_t fr[8];
+        if (shv_call(H_GET_FRAME_COUNT, NULL, 0, fr) != 0) { g_frame_ok = 0; plat_log("GET_FRAME_COUNT tidak tersedia; tick per perubahan timer"); }
+        else {
+            uint32_t fc = (uint32_t)fr[0];
+            if (fc == g_last_frame) return;
+            g_last_frame = fc;
+        }
+    }
     if (__sync_lock_test_and_set(&g_busy, 1)) return; /* cegah masuk ulang / thread lain */
     g_last_timer = t;
     if (!g_lua_ready) {
