@@ -93,6 +93,13 @@ void plat_main_module(uintptr_t *base_out, size_t *size_out)
                      (unsigned)i, handles[i], mi.name, (unsigned long long)(uintptr_t)mi.seg[0].address,
                      mi.seg[0].size, mi.seg_count);
             plat_log(line);
+            if (i == 0 || strstr(mi.name, "eboot")) {
+                for (unsigned k = 0; k < mi.seg_count && k < 4; k++) {
+                    snprintf(line, sizeof line, "  seg[%u] addr=0x%llx size=0x%x prot=%d", k,
+                             (unsigned long long)(uintptr_t)mi.seg[k].address, mi.seg[k].size, mi.seg[k].prot);
+                    plat_log(line);
+                }
+            }
             if (!first_base) { first_base = (uintptr_t)mi.seg[0].address; first_size = mi.seg[0].size; }
             if (!base && strstr(mi.name, "eboot")) { base = (uintptr_t)mi.seg[0].address; tsize = mi.seg[0].size; }
         }
@@ -197,4 +204,75 @@ int plat_read_file(const char *path, char **buf, size_t *len)
     *buf = b;
     if (len) *len = (size_t)n;
     return 0;
+}
+
+
+/*
+ * Diagnosis saat layout tidak ditemukan: cari hash native sebagai byte mentah di segmen kode
+ * yang berjalan, catat konteksnya, dan (kalau ada SHV_DIR/dump.txt) simpan segmen itu ke
+ * SHV_DIR/eboot_mem.bin supaya bisa dianalisis ulang. Hanya membaca memori yang sudah terbaca.
+ */
+static void hexline(const unsigned char *p, size_t n, char *out, size_t cap)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < n && o + 4 < cap; i++) o += (size_t)snprintf(out + o, cap - o, "%02x ", p[i]);
+    out[o] = 0;
+}
+
+void plat_diag(uintptr_t base, size_t size)
+{
+    static const struct { const char *name; unsigned char b[8]; } pats[] = {
+        { "GET_GAME_TIMER", {0x63,0x84,0x62,0x45,0x00,0x7B,0xD2,0x9C} },
+        { "PLAYER_PED_ID",  {0xA6,0x88,0xE9,0x74,0xFC,0x58,0x09,0xD8} },
+        { "GET_ENTITY_COORDS", {0x5A,0x0D,0x96,0x40,0x0D,0x77,0xEF,0x3F} },
+    };
+    const unsigned char *m = (const unsigned char *)base;
+    char line[400], hx[200];
+    unsigned int dumped = 0;
+    char *buf = NULL; size_t len = 0;
+
+    snprintf(line, sizeof line, "diag: 16 byte awal modul: ");
+    hexline(m, 16, hx, sizeof hx);
+    strncat(line, hx, sizeof line - strlen(line) - 1);
+    plat_log(line);
+
+    for (unsigned k = 0; k < 3; k++) {
+        unsigned hits8 = 0, hits4 = 0;
+        for (size_t i = 0; i + 8 <= size; i++) {
+            if (m[i] != pats[k].b[0]) continue;
+            if (memcmp(m + i, pats[k].b, 4) == 0) {
+                hits4++;
+                if (memcmp(m + i, pats[k].b, 8) == 0) {
+                    hits8++;
+                    if (hits8 <= 4 && i >= 16 && i + 24 <= size) {
+                        snprintf(line, sizeof line, "diag: %s ketemu di +0x%llx : ", pats[k].name, (unsigned long long)i);
+                        hexline(m + i - 16, 40, hx, sizeof hx);
+                        strncat(line, hx, sizeof line - strlen(line) - 1);
+                        plat_log(line);
+                    }
+                }
+            }
+        }
+        snprintf(line, sizeof line, "diag: %s byte-penuh=%u 4-byte-rendah=%u", pats[k].name, hits8, hits4);
+        plat_log(line);
+    }
+
+    if (plat_read_file(SHV_DIR "/dump.txt", &buf, &len) == 0) {
+        free(buf);
+        FILE *f = fopen(SHV_DIR "/eboot_mem.bin", "wb");
+        if (f) {
+            size_t off = 0;
+            while (off < size) {
+                size_t n = size - off > 0x100000 ? 0x100000 : size - off;
+                if (fwrite(m + off, 1, n, f) != n) break;
+                off += n;
+            }
+            fclose(f);
+            dumped = (unsigned)(off >> 20);
+        }
+        snprintf(line, sizeof line, "diag: dump selesai %u MB ke eboot_mem.bin", dumped);
+        plat_log(line);
+    } else {
+        plat_log("diag: buat file dump.txt di folder scripthook untuk menyimpan dump kode (eboot_mem.bin)");
+    }
 }
