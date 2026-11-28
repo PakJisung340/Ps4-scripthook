@@ -56,6 +56,38 @@ static void timer_wrapper(shv_ctx *ctx)
     __sync_lock_release(&g_busy);
 }
 
+/* Pilih hash GET_GAME_TIMER. Build lama: hash kanonik. Build 1.57: hash berbeda, jadi pilih lewat PERILAKU:
+ * handler getter variabel global yang naik ~1 ms per ms nyata. Bentuk kode saja tidak cukup unik. */
+static uint64_t pick_timer_hash(void)
+{
+    static shv_timer_cand c[1024];
+    static uint32_t v0[1024];
+    int nA = 0, nB = 0, n, pass = 0;
+    uint64_t guess = shv_xlate(H_GET_GAME_TIMER), best = 0;
+    char line[160];
+
+    if (shv_has_native(H_GET_GAME_TIMER)) return H_GET_GAME_TIMER;
+    n = shv_find_timer_candidates(c, 1024, &nA, &nB);
+    snprintf(line, sizeof line, "timer: %d kandidat bentuk (A=%d B=%d), tebakan crossmap=0x%llx", n, nA, nB,
+             (unsigned long long)guess);
+    plat_log(line);
+    for (int i = 0; i < n; i++) v0[i] = *(volatile uint32_t *)c[i].counter;
+    plat_sleep_ms(500);
+    for (int i = 0; i < n; i++) {
+        uint32_t d = *(volatile uint32_t *)c[i].counter - v0[i];
+        if (d >= 350 && d <= 1500) {
+            pass++;
+            snprintf(line, sizeof line, "timer: lolos uji perilaku hash=0x%llx delta=%u%s",
+                     (unsigned long long)c[i].hash, d, c[i].hash == guess ? " (= tebakan crossmap)" : "");
+            plat_log(line);
+            if (!best || c[i].hash == guess) best = c[i].hash;
+        }
+    }
+    snprintf(line, sizeof line, "timer: %d lolos uji perilaku, dipakai 0x%llx", pass, (unsigned long long)best);
+    plat_log(line);
+    return best;
+}
+
 static void *init_thread(void *arg)
 {
     unsigned waited_ms = 0;
@@ -64,13 +96,14 @@ static void *init_thread(void *arg)
     char line[96];
     (void)arg;
 
-    plat_log("=== scripthook start (CUSA00419 build, eboot " SHV_EBOOT_SHA256 ") ===");
+    plat_log("=== scripthook start (CUSA00419; layout v2 build 1.57 + v1 cadangan) ===");
     if (!plat_log_ok())
         plat_notify("Scripthook: log tidak bisa ditulis ke\n/data/GoldHEN/scripthook\nCoded by Said Awali");
     {
         uintptr_t base = 0; size_t tsize = 0;
         plat_main_module(&base, &tsize);
         core_ok = (shv_core_init_auto(base, tsize, core_log) == 0);
+        if (!core_ok) plat_diag(base, tsize);
     }
     if (!core_ok) {
         char msg[400];
@@ -82,14 +115,21 @@ static void *init_thread(void *arg)
         return NULL;
     }
 
-    /* Tabel native diisi saat init engine. Tunggu sampai GET_GAME_TIMER terdaftar. */
-    while (waited_ms < 180000) {
-        if (shv_hook_native(H_GET_GAME_TIMER, timer_wrapper, &g_orig_timer) == 0) { hooked = 1; break; }
-        plat_sleep_ms(1);
-        waited_ms++;
+    /* Tabel native diisi saat init engine. Tunggu sampai terisi, lalu pilih native timer. */
+    {
+        uint64_t th = 0;
+        while (waited_ms < 180000) {
+            if (shv_native_count() >= 3000 || shv_has_native(H_GET_GAME_TIMER)) {
+                plat_sleep_ms(1500);                 /* beri waktu registrasi selesai */
+                th = pick_timer_hash();
+                if (th && shv_hook_native(th, timer_wrapper, &g_orig_timer) == 0) { hooked = 1; break; }
+            }
+            plat_sleep_ms(1000);
+            waited_ms += 1000;
+        }
     }
     if (!hooked) {
-        plat_log("berhenti: GET_GAME_TIMER tidak pernah terdaftar dalam 180 detik");
+        plat_log("berhenti: native timer tidak ditemukan / tidak bisa di-hook dalam 180 detik");
         plat_notify("Scripthook gagal dimuat\nLihat scripthook.log\nCoded by Said Awali");
         return NULL;
     }
