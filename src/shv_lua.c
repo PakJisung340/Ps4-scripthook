@@ -28,6 +28,7 @@
 
 #include "lua.h"
 #include "lauxlib.h"
+#include "velora_names.h"
 #include "lualib.h"
 
 #define HOOK_EVERY      100000   /* instruksi VM per hook */
@@ -45,8 +46,13 @@ static const char PRELUDE[] =
 "function CreateThread(fn)\n"
 "  scripts[#scripts+1] = { co = coroutine.create(fn), wake = 0 }\n"
 "end\n"
+"local lastErr\n"
 "function __tick(t)\n"
 "  now = t\n"
+"  if type(onFrame) == 'function' then\n"
+"    local ok, e = pcall(onFrame)\n"
+"    if not ok and tostring(e) ~= lastErr then lastErr = tostring(e); log('error onFrame: ' .. lastErr) end\n"
+"  end\n"
 "  local snapshot = {}\n"
 "  for i = 1, #scripts do snapshot[i] = scripts[i] end\n"
 "  for _, s in ipairs(snapshot) do\n"
@@ -66,6 +72,27 @@ static const char PRELUDE[] =
 "  for _, s in ipairs(scripts) do if not s.dead then alive[#alive+1] = s end end\n"
 "  scripts = alive\n"
 "end\n";
+
+
+/* Lapisan kompatibilitas Velora: Velora.invoke/Print dan tabel Native (nama -> handler lewat alamat). */
+static const char PRELUDE_VELORA[] =
+"local T = {}\n"
+"for name, a, ty in __NAMES:gmatch('(%S+) (%x+) (%S+)\\n') do T[name] = { tonumber(a, 16), ty } end\n"
+"__NAMES = nil\n"
+"local blocked = { WAIT = true, START_NEW_SCRIPT = true, START_NEW_SCRIPT_WITH_ARGS = true,\n"
+"  START_NEW_SCRIPT_WITH_NAME_HASH = true, START_NEW_SCRIPT_WITH_NAME_HASH_AND_ARGS = true }\n"
+"local invoke = native.invoke\n"
+"Velora = { invoke = invoke }\n"
+"function Velora.Print(m) log('[Print] ' .. (tostring(m):gsub('~%a~', ''))) end\n"
+"Native = setmetatable({}, { __index = function(t, k)\n"
+"  local e = T[k]\n"
+"  if not e then return nil end\n"
+"  local f\n"
+"  if blocked[k] or e[1] == 0 then f = function() return nil end\n"
+"  else local addr, ty = e[1], e[2]; f = function(...) return invoke(addr, ty, ...) end end\n"
+"  rawset(t, k, f)\n"
+"  return f\n"
+"end })\n";
 
 static void budget_hook(lua_State *l, lua_Debug *ar)
 {
@@ -170,19 +197,19 @@ static int l_joaat(lua_State *l)
     return 1;
 }
 
-static int l_call(lua_State *l)
-{
-    uint64_t hash = (uint64_t)luaL_checkinteger(l, 1);
-    const char *rk = luaL_checkstring(l, 2);
-    int n = lua_gettop(l) - 2;
-    uint64_t args[32];
-    char sbuf[8][128];
-    int ns = 0;
-    uint64_t r[8];
+/* Ring buffer string persisten: pointer tetap valid sampai 128 string berikutnya (native tertentu
+ * menyimpan pointer sebentar). */
+#define STR_SLOTS 128
+#define STR_LEN   256
+static char g_strs[STR_SLOTS][STR_LEN];
+static unsigned g_str_next;
 
+/* Ubah argumen Lua [first, first+n) menjadi slot 8-byte native. Return 0 sukses, lain = pesan galat sudah dilempar. */
+static int marshal_args(lua_State *l, int first, int n, uint64_t *args)
+{
     if (n > 32) return luaL_error(l, "terlalu banyak argumen (maks 32)");
     for (int i = 0; i < n; i++) {
-        int idx = 3 + i;
+        int idx = first + i;
         switch (lua_type(l, idx)) {
         case LUA_TNUMBER:
             if (lua_isinteger(l, idx)) {
@@ -198,32 +225,73 @@ static int l_call(lua_State *l)
         case LUA_TNIL:     args[i] = 0; break;
         case LUA_TLIGHTUSERDATA: args[i] = (uint64_t)(uintptr_t)lua_touserdata(l, idx); break;
         case LUA_TSTRING: {
-            size_t len; const char *s = lua_tolstring(l, idx, &len);
-            if (ns >= 8 || len >= sizeof sbuf[0]) return luaL_error(l, "string argumen terlalu panjang/banyak");
-            memcpy(sbuf[ns], s, len + 1);
-            args[i] = (uint64_t)(uintptr_t)sbuf[ns++];
+            size_t len; const char *str = lua_tolstring(l, idx, &len);
+            char *slot = g_strs[g_str_next++ % STR_SLOTS];
+            if (len >= STR_LEN) return luaL_error(l, "string argumen terlalu panjang (maks %d)", STR_LEN - 1);
+            memcpy(slot, str, len + 1);
+            args[i] = (uint64_t)(uintptr_t)slot;
             break;
         }
         default: return luaL_error(l, "argumen %d: tipe tidak didukung", i + 1);
         }
     }
+    return 0;
+}
 
-    if (shv_call(hash, args, (uint32_t)n, r) != 0)
-        return luaL_error(l, "native 0x%llX tidak ada di tabel", (unsigned long long)hash);
+static float slot_f(uint64_t v) { float f; uint32_t b = (uint32_t)v; memcpy(&f, &b, 4); return f; }
 
-    switch (rk[0]) {
+/* kode tipe: i int32, u uint32, b bool, f float, p pointer, s string, v vector3, 0 void */
+static int push_ret(lua_State *l, char rk, const uint64_t *r)
+{
+    switch (rk) {
     case 'i': lua_pushinteger(l, (int32_t)r[0]); return 1;
     case 'u': lua_pushinteger(l, (uint32_t)r[0]); return 1;
     case 'b': lua_pushboolean(l, (uint32_t)r[0] != 0); return 1;
-    case 'f': { float f; uint32_t b = (uint32_t)r[0]; memcpy(&f, &b, 4); lua_pushnumber(l, f); return 1; }
+    case 'f': lua_pushnumber(l, slot_f(r[0])); return 1;
     case 'p': lua_pushlightuserdata(l, (void *)(uintptr_t)r[0]); return 1;
     case 's': if (r[0]) lua_pushstring(l, (const char *)(uintptr_t)r[0]); else lua_pushnil(l); return 1;
-    case 'v': {
-        for (int i = 0; i < 3; i++) { float f; uint32_t b = (uint32_t)r[i]; memcpy(&f, &b, 4); lua_pushnumber(l, f); }
+    case 'v':
+        for (int i = 0; i < 3; i++) lua_pushnumber(l, slot_f(r[i]));
         return 3;
-    }
     default: return 0;
     }
+}
+
+static int l_call(lua_State *l)
+{
+    uint64_t hash = (uint64_t)luaL_checkinteger(l, 1);
+    const char *rk = luaL_checkstring(l, 2);
+    int n = lua_gettop(l) - 2;
+    uint64_t args[32], r[8];
+
+    marshal_args(l, 3, n, args);
+    if (shv_call(hash, args, (uint32_t)n, r) != 0) {
+        char m[64]; snprintf(m, sizeof m, "native 0x%llX tidak ada di tabel", (unsigned long long)hash);
+        return luaL_error(l, "%s", m);
+    }
+    return push_ret(l, rk[0], r);
+}
+
+/* Velora.invoke(alamat, "void"|"bool"|"int"|"float"|"vector3"|"string", ...): sama dengan loader Velora. */
+static int l_invoke(lua_State *l)
+{
+    uint64_t va = (uint64_t)luaL_checkinteger(l, 1);
+    const char *rt = luaL_checkstring(l, 2);
+    int n = lua_gettop(l) - 2;
+    uint64_t args[32], r[8];
+    char rk = 0;
+
+    if (!strcmp(rt, "bool")) rk = 'b';
+    else if (!strcmp(rt, "int")) rk = 'i';
+    else if (!strcmp(rt, "float")) rk = 'f';
+    else if (!strcmp(rt, "vector3")) rk = 'v';
+    else if (!strcmp(rt, "string")) rk = 's';
+    marshal_args(l, 3, n, args);
+    if (shv_call_va(va, args, (uint32_t)n, r) != 0) {
+        char m[64]; snprintf(m, sizeof m, "alamat 0x%llX bukan handler native terdaftar", (unsigned long long)va);
+        return luaL_error(l, "%s", m);
+    }
+    return push_ret(l, rk, r);
 }
 
 static void run_script_file(const char *name)
@@ -251,7 +319,7 @@ int shv_lua_init(void)
         { NULL, NULL }
     };
     static const luaL_Reg nat[] = {
-        { "call", l_call }, { "alloc", l_alloc }, { "free", l_free },
+        { "call", l_call }, { "invoke", l_invoke }, { "alloc", l_alloc }, { "free", l_free },
         { "peek", l_peek }, { "poke", l_poke }, { "joaat", l_joaat }, { NULL, NULL }
     };
     char *list = NULL; size_t len = 0;
@@ -265,6 +333,8 @@ int shv_lua_init(void)
     lua_sethook(L, budget_hook, LUA_MASKCOUNT, HOOK_EVERY);
 
     if (luaL_dostring(L, PRELUDE) != LUA_OK) { plat_log(lua_tostring(L, -1)); return -1; }
+    lua_pushstring(L, VELORA_NAMES); lua_setglobal(L, "__NAMES");
+    if (luaL_dostring(L, PRELUDE_VELORA) != LUA_OK) { plat_log(lua_tostring(L, -1)); return -1; }
 
     if (plat_read_file(SHV_DIR "/scripts.txt", &list, &len) != 0) {
         plat_log("scripts.txt tidak ada, mencoba main.lua");
