@@ -1,5 +1,6 @@
 #include "shv_core.h"
 #include "offsets.h"
+#include "crossmap157.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -29,6 +30,47 @@ static uintptr_t   g_reg;       /* alamat RegisterNative */
 static shv_log_fn  g_log;
 static struct { uint64_t hash; shv_native_fn orig; shv_native_fn wrapper; } g_hooks[MAX_HOOKS];
 static int g_nhooks;
+static int g_v2;               /* 1 = tabel ter-enkripsi (build 1.57), 0 = tata letak lama */
+
+/* Akses node yang tidak peduli tata letak.
+ * v2 (dari disassembly RegisterNative build 1.57 di VA 0x25A1B70): node 0x100 byte.
+ *   +0x00 next  : 2x u32, di-XOR dengan (u32)node dan kunci di +0x08
+ *   +0x10+8*i   : handler (polos)
+ *   +0x48/+0x4C : count = [+4C] ^ (u32)(node+0x48) ^ [+48]
+ *   +0x54+16*i  : hash i = {lo,hi,kunci}; lo = [s]^(u32)s^[s+8], hi = [s+4]^(u32)s^[s+8], s = alamat slot */
+static inline uint32_t rd32(uintptr_t a) { return *(const volatile uint32_t *)a; }
+static void *n_next(void *n)
+{
+    uintptr_t p = (uintptr_t)n;
+    if (!g_v2) return ((shv_node *)n)->next;
+    {
+        uint32_t k = (uint32_t)p ^ rd32(p + 8);
+        uint64_t lo = rd32(p) ^ k, hi = rd32(p + 4) ^ k;
+        return (void *)(uintptr_t)(lo | (hi << 32));
+    }
+}
+static uint32_t n_count(void *n)
+{
+    uintptr_t p = (uintptr_t)n;
+    uint32_t c;
+    if (!g_v2) c = ((shv_node *)n)->count;
+    else c = rd32(p + 0x4C) ^ (uint32_t)(p + 0x48) ^ rd32(p + 0x48);
+    return c > 7 ? 7 : c;
+}
+static uint64_t n_hash(void *n, uint32_t i)
+{
+    if (!g_v2) return ((shv_node *)n)->hash[i];
+    {
+        uintptr_t s = (uintptr_t)n + 0x54 + 16 * (uintptr_t)i;
+        uint32_t k = (uint32_t)s ^ rd32(s + 8);
+        return (uint64_t)(rd32(s) ^ k) | ((uint64_t)(rd32(s + 4) ^ k) << 32);
+    }
+}
+static shv_native_fn *n_hslot(void *n, uint32_t i)
+{
+    if (!g_v2) return &((shv_node *)n)->handler[i];
+    return (shv_native_fn *)((uintptr_t)n + 0x10 + 8 * (uintptr_t)i);
+}
 
 static void logf_(const char *fmt, uint64_t a, uint64_t b)
 {
@@ -38,6 +80,7 @@ static void logf_(const char *fmt, uint64_t a, uint64_t b)
     g_log(buf);
 }
 
+static uintptr_t g_tlo, g_thi;   /* segmen kode modul utama */
 static char g_diag[200];
 
 const char *shv_last_diag(void) { return g_diag; }
@@ -56,6 +99,7 @@ static void log_bytes(const char *label, const uint8_t *p, size_t n)
 
 int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
 {
+    g_v2 = 0;
     g_base = base;
     g_buckets = base + OFF_NATIVE_BUCKETS;
     g_reg = base + OFF_REGISTER_NATIVE;
@@ -96,18 +140,18 @@ int shv_core_init(uintptr_t base, int verify, shv_log_fn log)
 static int find_slot(uint64_t hash, shv_node **node_out, uint32_t *idx_out)
 {
     shv_node **buckets = (shv_node **)g_buckets;
-    shv_node *n = buckets[hash & 0xFF];
+    void *n = buckets[hash & 0xFF];
     int guard = 0;
     while (n && guard++ < 4096) {
-        uint32_t cnt = n->count > 7 ? 7 : n->count;
+        uint32_t cnt = n_count(n);
         for (uint32_t i = 0; i < cnt; i++) {
-            if (n->hash[i] == hash) {
-                *node_out = n;
+            if (n_hash(n, i) == hash) {
+                *node_out = (shv_node *)n;
                 *idx_out = i;
                 return 1;
             }
         }
-        n = n->next;
+        n = n_next(n);
     }
     return 0;
 }
@@ -123,7 +167,7 @@ shv_native_fn shv_find_handler(uint64_t hash)
 {
     shv_node *n; uint32_t i;
     if (!find_slot(hash, &n, &i)) return NULL;
-    return original_for(hash, n->handler[i]);
+    return original_for(hash, *n_hslot(n, i));
 }
 
 int shv_hook_native(uint64_t hash, shv_native_fn wrapper, shv_native_fn *orig)
@@ -135,11 +179,11 @@ int shv_hook_native(uint64_t hash, shv_native_fn wrapper, shv_native_fn *orig)
         if (g_hooks[k].hash == hash) return -2; /* sudah di-hook */
 
     g_hooks[g_nhooks].hash = hash;
-    g_hooks[g_nhooks].orig = n->handler[i];
+    g_hooks[g_nhooks].orig = *n_hslot(n, i);
     g_hooks[g_nhooks].wrapper = wrapper;
-    if (orig) *orig = n->handler[i];
+    if (orig) *orig = *n_hslot(n, i);
     g_nhooks++;
-    n->handler[i] = wrapper;   /* tulis 8 byte ter-align, data saja: tidak menyentuh kode */
+    *n_hslot(n, i) = wrapper;   /* tulis 8 byte ter-align, data saja: tidak menyentuh kode */
     logf_("hook terpasang untuk native 0x%llx (handler asli 0x%llx)", hash, (uint64_t)(uintptr_t)g_hooks[g_nhooks - 1].orig);
     return 0;
 }
@@ -148,15 +192,29 @@ void shv_unhook_all(void)
 {
     for (int k = 0; k < g_nhooks; k++) {
         shv_node *n; uint32_t i;
-        if (find_slot(g_hooks[k].hash, &n, &i) && n->handler[i] == g_hooks[k].wrapper)
-            n->handler[i] = g_hooks[k].orig;
+        if (find_slot(g_hooks[k].hash, &n, &i) && *n_hslot(n, i) == g_hooks[k].wrapper)
+            *n_hslot(n, i) = g_hooks[k].orig;
     }
     g_nhooks = 0;
+}
+
+uint64_t shv_xlate(uint64_t canon)
+{
+    unsigned lo = 0, hi = shv_xtab_n;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (shv_xtab[mid].canon < canon) lo = mid + 1; else hi = mid;
+    }
+    return (lo < shv_xtab_n && shv_xtab[lo].canon == canon) ? shv_xtab[lo].build : 0;
 }
 
 int shv_call(uint64_t hash, const uint64_t *args, uint32_t argc, uint64_t *ret)
 {
     shv_native_fn fn = shv_find_handler(hash);
+    if (!fn && g_v2) {                       /* build 1.57: script memakai hash kanonik */
+        uint64_t b = shv_xlate(hash);
+        if (b) fn = shv_find_handler(b);
+    }
     uint64_t argbuf[32];
     uint64_t retbuf[8];
     shv_ctx ctx;
@@ -245,8 +303,49 @@ static int locate_by_scan(uintptr_t base, size_t text_size)
     return -1;
 }
 
+/* Jumlah native yang terbaca dari tabel (v2 ter-enkripsi atau v1). */
+int shv_native_count(void)
+{
+    shv_node **bk = (shv_node **)g_buckets;
+    int total = 0;
+    if (!g_buckets) return 0;
+    for (int bi = 0; bi < 256; bi++) {
+        void *n = bk[bi];
+        int guard = 0;
+        while (n && guard++ < 4096) { total += (int)n_count(n); n = n_next(n); }
+    }
+    return total;
+}
+
+/* Build 1.57 (eboot f9161cc5...): thunk RegisterNative di VA 0x1E175B0 memuat "lea rdi,[rip+..]" ke
+ * objek tabel di VA 0x3DF7680. Byte awal thunk dipakai sebagai cek identitas build. */
+#define V2_OFF_THUNK   0x1E175B0ULL
+#define V2_OFF_BUCKETS 0x3DF7680ULL
+static int init_v2(uintptr_t base, size_t text_size, shv_log_fn log)
+{
+    static const uint8_t sig[9] = { 0x48,0x89,0xF0,0x48,0x89,0xF9,0x48,0x8D,0x3D };
+    if (V2_OFF_THUNK + sizeof sig > text_size) return -1;
+    if (memcmp((const void *)(base + V2_OFF_THUNK), sig, sizeof sig) != 0) {
+        logf_("v2: thunk RegisterNative tidak cocok di +0x%llx", V2_OFF_THUNK, 0);
+        log_bytes("  yang ada", (const uint8_t *)(base + V2_OFF_THUNK), sizeof sig);
+        return -1;
+    }
+    g_base = base; g_log = log; g_nhooks = 0;
+    g_tlo = base; g_thi = base + text_size;
+    g_v2 = 1;
+    g_reg = base + V2_OFF_THUNK;
+    g_buckets = base + V2_OFF_BUCKETS;
+    logf_("tata letak v2 (build 1.57, tabel ter-enkripsi): tabel=base+0x%llx", V2_OFF_BUCKETS, 0);
+    return 0;
+}
+
 int shv_core_init_auto(uintptr_t base, size_t text_size, shv_log_fn log)
 {
+    /* 0. build 1.57 (tabel ter-enkripsi) */
+    g_log = log;
+    if (init_v2(base, text_size, log) == 0) return 0;
+    g_v2 = 0;
+    g_tlo = base; g_thi = base + text_size;
     /* 1. coba offset statis (build yang sama dengan eboot analisis) */
     if (OFF_REGISTER_NATIVE + SIG_REGISTER_NATIVE_LEN <= text_size &&
         OFF_GET_GAME_TIMER_HANDLER + SIG_GET_GAME_TIMER_LEN <= text_size &&
@@ -255,11 +354,135 @@ int shv_core_init_auto(uintptr_t base, size_t text_size, shv_log_fn log)
         return 0;
     }
     /* 2. cari lewat pola kode */
+    g_tlo = base; g_thi = base + text_size;
     g_base = base;
     g_log = log;
     g_nhooks = 0;
     logf_("offset statis tidak cocok; memindai segmen kode (base=0x%llx size=0x%llx)", base, (uint64_t)text_size);
     return locate_by_scan(base, text_size);
+}
+
+/* ------------------------------------------------------------------------------------------
+ * Pencarian lewat bentuk data (tidak bergantung hash maupun pola kode pendaftaran).
+ * ------------------------------------------------------------------------------------------ */
+static int node_ok(uintptr_t addr, unsigned bucket, shv_readable_fn rd)
+{
+    const shv_node *n = (const shv_node *)addr;
+    uintptr_t h;
+    if (addr & 7) return 0;
+    if (!rd(addr, sizeof *n)) return 0;
+    if (n->count < 1 || n->count > 7) return 0;
+    if ((unsigned)(n->hash[0] & 0xFF) != bucket) return 0;
+    h = (uintptr_t)n->handler[0];
+    return h >= g_tlo && h < g_thi;
+}
+
+int shv_core_init_structural(uintptr_t tbase, size_t tsize, uintptr_t dbase, size_t dsize,
+                             shv_readable_fn rd, shv_log_fn log)
+{
+    int shown = 0, cands = 0;
+    g_log = log; g_base = tbase; g_tlo = tbase; g_thi = tbase + tsize; g_nhooks = 0;
+    if (!rd || dsize < 2048 || !rd(dbase, dsize)) {
+        logf_("pencarian bentuk: segmen data 0x%llx (+0x%llx) tidak terbaca", dbase, (uint64_t)dsize);
+        snprintf(g_diag, sizeof g_diag, "data seg tak terbaca\nbase=0x%llx", (unsigned long long)dbase);
+        return -1;
+    }
+    for (uintptr_t p = (dbase + 7) & ~(uintptr_t)7; p + 2048 <= dbase + dsize; p += 8) {
+        const uint64_t *e = (const uint64_t *)p;
+        int miss = 0, bad = 0;
+        for (int i = 0; i < 256 && miss <= 56; i++) {
+            uint64_t v = e[i];
+            if (v == 0 || (v & 7) || v < 0x10000 || v >> 47) miss++;
+        }
+        if (miss > 56) continue;
+        cands++;
+        for (int i = 0; i < 256 && bad <= 8; i++)
+            if (e[i] && !node_ok((uintptr_t)e[i], (unsigned)i, rd)) bad++;
+        if (bad <= 8) {
+            g_buckets = p;
+            logf_("tabel ditemukan lewat bentuk data: array bucket di 0x%llx (data+0x%llx)", p, (uint64_t)(p - dbase));
+            return 0;
+        }
+        if (shown < 3) {                       /* tata letak node mungkin beda: simpan contoh untuk diagnosis */
+            for (int i = 0; i < 256; i++) {
+                if (e[i] && rd((uintptr_t)e[i], 0x80)) {
+                    char lab[48];
+                    snprintf(lab, sizeof lab, "kandidat 0x%llx node[%d]", (unsigned long long)p, i);
+                    log_bytes(lab, (const uint8_t *)(uintptr_t)e[i], 0x40);
+                    break;
+                }
+            }
+            shown++;
+        }
+    }
+    snprintf(g_diag, sizeof g_diag, "bentuk gagal: kandidat=%d\ndata=0x%llx+0x%llx",
+             cands, (unsigned long long)dbase, (unsigned long long)dsize);
+    logf_("pencarian bentuk gagal: kandidat array=%llu", (uint64_t)cands, 0);
+    return -1;
+}
+
+int shv_has_native(uint64_t hash)
+{
+    shv_node *n; uint32_t i;
+    return g_buckets && find_slot(hash, &n, &i);
+}
+
+int shv_find_timer_candidates(shv_timer_cand *out, int max, int *nA, int *nB)
+{
+    int cnt = 0, a = 0, b = 0;
+    shv_node **bk = (shv_node **)g_buckets;
+    if (!g_buckets || !g_thi) return 0;
+    for (int bi = 0; bi < 256; bi++) {
+        void *n = bk[bi];
+        int guard = 0;
+        while (n && guard++ < 4096) {
+            uint32_t c = n_count(n);
+            for (uint32_t i = 0; i < c; i++) {
+                const uint8_t *h = (const uint8_t *)(uintptr_t)*n_hslot(n, i);
+                uintptr_t target = 0;
+                int32_t d;
+                if ((uintptr_t)h < g_tlo || (uintptr_t)h + 16 > g_thi) continue;
+                /* A: mov rax,[rdi]; lea rcx,[rip+d]; mov ecx,[rcx]; mov [rax],ecx; ret */
+                if (!memcmp(h, "\x48\x8B\x07\x48\x8D\x0D", 6) && !memcmp(h + 10, "\x8B\x09\x89\x08\xC3", 5)) {
+                    memcpy(&d, h + 6, 4); target = (uintptr_t)((intptr_t)(h + 10) + d); a++;
+                }
+                /* B: mov rax,[rdi]; mov ecx,[rip+d]; mov [rax],ecx; ret */
+                else if (!memcmp(h, "\x48\x8B\x07\x8B\x0D", 5) && !memcmp(h + 9, "\x89\x08\xC3", 3)) {
+                    memcpy(&d, h + 5, 4); target = (uintptr_t)((intptr_t)(h + 9) + d); b++;
+                }
+                if (target && cnt < max) { out[cnt].hash = n_hash(n, i); out[cnt].counter = target; cnt++; }
+            }
+            n = n_next(n);
+        }
+    }
+    if (nA) *nA = a;
+    if (nB) *nB = b;
+    return cnt;
+}
+
+void shv_dump_natives(shv_log_fn sink)
+{
+    shv_node **bk = (shv_node **)g_buckets;
+    char line[200];
+    if (!g_buckets || !sink) return;
+    for (int bi = 0; bi < 256; bi++) {
+        void *n = bk[bi];
+        int guard = 0;
+        while (n && guard++ < 4096) {
+            uint32_t c = n_count(n);
+            for (uint32_t i = 0; i < c; i++) {
+                uintptr_t h = (uintptr_t)*n_hslot(n, i);
+                size_t pos = (size_t)snprintf(line, sizeof line, "%016llx %llx",
+                                              (unsigned long long)n_hash(n, i),
+                                              (unsigned long long)(h - g_tlo));
+                if (h >= g_tlo && h + 16 <= g_thi)
+                    for (int k = 0; k < 16; k++)
+                        pos += (size_t)snprintf(line + pos, sizeof line - pos, " %02x", ((const uint8_t *)h)[k]);
+                sink(line);
+            }
+            n = n_next(n);
+        }
+    }
 }
 
 uintptr_t shv_buckets_addr(void) { return g_buckets; }
