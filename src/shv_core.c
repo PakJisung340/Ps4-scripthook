@@ -3,6 +3,7 @@
 #include "crossmap157.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Node tabel native. Tata letak dari disassembly RegisterNative (0x1AB0840):
@@ -208,6 +209,23 @@ uint64_t shv_xlate(uint64_t canon)
     return (lo < shv_xtab_n && shv_xtab[lo].canon == canon) ? shv_xtab[lo].build : 0;
 }
 
+static void do_call(shv_native_fn fn, const uint64_t *args, uint32_t argc, uint64_t *ret)
+{
+    uint64_t argbuf[32];
+    uint64_t retbuf[8];
+    shv_ctx ctx;
+    if (argc > 32) argc = 32;
+    memset(argbuf, 0, sizeof argbuf);
+    memset(retbuf, 0, sizeof retbuf);
+    memset(&ctx, 0, sizeof ctx);
+    if (args && argc) memcpy(argbuf, args, argc * sizeof(uint64_t));
+    ctx.ret = retbuf;
+    ctx.args = argbuf;
+    ctx.argc = argc;
+    fn(&ctx);
+    if (ret) memcpy(ret, retbuf, sizeof retbuf);
+}
+
 int shv_call(uint64_t hash, const uint64_t *args, uint32_t argc, uint64_t *ret)
 {
     shv_native_fn fn = shv_find_handler(hash);
@@ -215,23 +233,54 @@ int shv_call(uint64_t hash, const uint64_t *args, uint32_t argc, uint64_t *ret)
         uint64_t b = shv_xlate(hash);
         if (b) fn = shv_find_handler(b);
     }
-    uint64_t argbuf[32];
-    uint64_t retbuf[8];
-    shv_ctx ctx;
-
     if (!fn) return -1;
-    if (argc > 32) argc = 32;
-    memset(argbuf, 0, sizeof argbuf);
-    memset(retbuf, 0, sizeof retbuf);
-    memset(&ctx, 0, sizeof ctx);
-    if (args && argc) memcpy(argbuf, args, argc * sizeof(uint64_t));
+    do_call(fn, args, argc, ret);
+    return 0;
+}
 
-    ctx.ret = retbuf;
-    ctx.args = argbuf;
-    ctx.argc = argc;
-    fn(&ctx);
+/* Himpunan alamat handler asli yang terdaftar (untuk memvalidasi pemanggilan lewat alamat, gaya Velora). */
+static uintptr_t *g_hset;
+static unsigned g_hset_n;
 
-    if (ret) memcpy(ret, retbuf, sizeof retbuf);
+static int cmp_uptr(const void *a, const void *b)
+{
+    uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void build_hset(void)
+{
+    shv_node **bk = (shv_node **)g_buckets;
+    unsigned cap = (unsigned)shv_native_count() + 16, n = 0;
+    uintptr_t *set = (uintptr_t *)malloc(cap * sizeof *set);
+    if (!set) return;
+    for (int bi = 0; bi < 256; bi++) {
+        void *nd = bk[bi];
+        int guard = 0;
+        while (nd && guard++ < 4096) {
+            uint32_t c = n_count(nd);
+            for (uint32_t i = 0; i < c && n < cap; i++)
+                set[n++] = (uintptr_t)original_for(n_hash(nd, i), *n_hslot(nd, i));
+            nd = n_next(nd);
+        }
+    }
+    qsort(set, n, sizeof *set, cmp_uptr);
+    g_hset = set; g_hset_n = n;
+}
+
+int shv_call_va(uint64_t va, const uint64_t *args, uint32_t argc, uint64_t *ret)
+{
+    uintptr_t target = g_base + (uintptr_t)va;
+    unsigned lo = 0, hi;
+    if (!g_buckets) return -1;
+    if (!g_hset) build_hset();
+    hi = g_hset_n;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (g_hset[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    if (lo >= g_hset_n || g_hset[lo] != target) return -1;   /* bukan handler native terdaftar */
+    do_call((shv_native_fn)target, args, argc, ret);
     return 0;
 }
 
