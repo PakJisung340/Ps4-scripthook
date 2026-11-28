@@ -21,4 +21,7 @@ void plat_notify(const char *msg);
 /* Baca seluruh file; buffer dari malloc, NUL-terminated. Return 0 sukses. */
 int  plat_read_file(const char *path, char **buf, size_t *len);
 
+/* Diagnosis saat layout tidak ditemukan (log + dump opsional). */
+void plat_diag(uintptr_t base, size_t size);
+
 #endif
